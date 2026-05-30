@@ -149,7 +149,7 @@ while True:
 
                 # INTRUSION ALERT (instant)
                 if track_id not in intrusion_alerted:
-                    msg = f"🚨 INTRUSION ALERT | ID: {track_id}"
+                    msg = f" INTRUSION ALERT | ID: {track_id}"
                     st.session_state.alerts.append(msg)
                     send_telegram(msg)
                     send_photo(frame, msg)
@@ -157,7 +157,7 @@ while True:
 
                 # LOITERING ALERT
                 if zone_time > LOITER_TIME and track_id not in loiter_alerted:
-                    msg = f"⚠️ LOITERING ALERT | ID: {track_id}"
+                    msg = f" LOITERING ALERT | ID: {track_id}"
                     st.session_state.alerts.append(msg)
                     send_telegram(msg)
                     send_photo(frame, msg)
