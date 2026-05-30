@@ -1,0 +1,2 @@
+# ai-surveillance-system-using-yolo-bytetrack-fastapi
+AI-powered surveillance system built using YOLO for real-time object detection, DeepSORT for multi-object tracking, and custom rule-based logic for security event analysis. Detects intrusion, loitering, unauthorized access, and suspicious activities from CCTV feeds, providing real-time alerts and actionable insights for enhanced security monitoring
