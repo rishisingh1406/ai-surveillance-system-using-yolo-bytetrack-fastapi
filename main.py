@@ -1,90 +1,115 @@
+import streamlit as st
 import cv2
 import time
 from ultralytics import YOLO
+import requests
+import os
+from dotenv import load_dotenv
+from io import BytesIO
 
-# =====================================
 # CONFIG
-# =====================================
 
-VIDEO_SOURCE = 0          # Webcam
-LOITER_TIME = 15          # Seconds in restricted zone
-LONG_STAY_HOURS = 5       # Continuous tracking time
+load_dotenv()
 
-# Restricted Zone
-ZONE_X1 = 200
-ZONE_Y1 = 100
-ZONE_X2 = 500
-ZONE_Y2 = 400
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-# =====================================
-# LOAD MODEL
-# =====================================
+VIDEO_SOURCE = "video.mp4"
+LOITER_TIME = 15
 
 model = YOLO("yolov8n.pt")
 
-# =====================================
-# MEMORY
-# =====================================
+# STREAMLIT SETUP
 
-intrusion_alerted = set()
-loiter_alerted = set()
-long_stay_alerted = set()
+st.set_page_config(page_title="AI Security System", layout="wide")
+st.title("AI Surveillance System (YOLO + Telegram)")
 
-# Track zone entry time
-zone_entry_time = {}
+left, right = st.columns([2, 1])
+video_box = left.empty()
+log_box = right.empty()
 
-# Track total time person exists
-person_first_seen = {}
+# SESSION STATE
 
-# =====================================
-# ALARM FUNCTION
-# =====================================
+if "run" not in st.session_state:
+    st.session_state.run = False
 
-def beep(freq=1000, duration=500):
-    try:
-        import winsound
-        winsound.Beep(freq, duration)
-    except:
-        pass
+if "alerts" not in st.session_state:
+    st.session_state.alerts = []
 
-# =====================================
+# BUTTONS
+
+with right:
+    if st.button("Start"):
+        st.session_state.run = True
+
+    if st.button("Stop"):
+        st.session_state.run = False
+
 # VIDEO CAPTURE
-# =====================================
 
 cap = cv2.VideoCapture(VIDEO_SOURCE)
 
+if not cap.isOpened():
+    st.error("Video not found or cannot be opened")
+    st.stop()
+
+ret, frame = cap.read()
+if not ret:
+    st.error("Cannot read video frame")
+    st.stop()
+
+h, w, _ = frame.shape
+
+# SECURITY ZONE
+ZONE_X1, ZONE_Y1 = int(w * 0.2), int(h * 0.2)
+ZONE_X2, ZONE_Y2 = int(w * 0.7), int(h * 0.7)
+
+# MEMORY
+
+zone_entry_time = {}
+person_first_seen = {}
+intrusion_alerted = set()
+loiter_alerted = set()
+
+# TELEGRAM FUNCTIONS
+
+def send_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        print("Telegram:", r.text)
+    except Exception as e:
+        print("Telegram error:", e)
+
+
+def send_photo(frame, caption):
+    try:
+        _, buffer = cv2.imencode(".jpg", frame)
+        bio = BytesIO(buffer.tobytes())
+        bio.name = "alert.jpg"
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        r = requests.post(
+            url,
+            data={"chat_id": CHAT_ID, "caption": caption},
+            files={"photo": bio}
+        )
+        print("Photo:", r.text)
+
+    except Exception as e:
+        print("Photo error:", e)
+
+# MAIN LOOP
+
 while True:
 
-    ret, frame = cap.read()
+    if not st.session_state.run:
+        time.sleep(0.5)
+        continue
 
+    ret, frame = cap.read()
     if not ret:
         break
-
-    # =====================================
-    # DRAW RESTRICTED ZONE
-    # =====================================
-
-    cv2.rectangle(
-        frame,
-        (ZONE_X1, ZONE_Y1),
-        (ZONE_X2, ZONE_Y2),
-        (0, 0, 255),
-        2
-    )
-
-    cv2.putText(
-        frame,
-        "RESTRICTED ZONE",
-        (ZONE_X1, ZONE_Y1 - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 0, 255),
-        2
-    )
-
-    # =====================================
-    # YOLO + BYTETRACK
-    # =====================================
 
     results = model.track(
         frame,
@@ -93,206 +118,66 @@ while True:
         verbose=False
     )
 
-    if (
-        len(results) > 0
-        and results[0].boxes is not None
-        and results[0].boxes.id is not None
-    ):
+    # DRAW ZONE
+    cv2.rectangle(frame, (ZONE_X1, ZONE_Y1), (ZONE_X2, ZONE_Y2), (0, 0, 255), 2)
 
-        boxes = results[0].boxes
+    if results and results[0].boxes is not None and results[0].boxes.id is not None:
 
-        for box in boxes:
-
-            cls_id = int(box.cls[0])
-            track_id = int(box.id[0])
+        for box in results[0].boxes:
 
             # PERSON ONLY
-            if cls_id != 0:
+            if int(box.cls[0]) != 0:
                 continue
 
-            # =====================================
-            # LONG STAY TRACKING
-            # =====================================
+            track_id = int(box.id[0])
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
+            # FIRST SEEN
             if track_id not in person_first_seen:
                 person_first_seen[track_id] = time.time()
 
-            total_time_seen = (
-                time.time()
-                - person_first_seen[track_id]
-            )
+            # ZONE CHECK
+            inside = (ZONE_X1 <= cx <= ZONE_X2 and ZONE_Y1 <= cy <= ZONE_Y2)
 
-            if (
-                total_time_seen >= LONG_STAY_HOURS * 3600
-                and track_id not in long_stay_alerted
-            ):
-
-                print(
-                    f"🚨 LONG STAY ALERT! "
-                    f"Person {track_id} present "
-                    f"for {LONG_STAY_HOURS} hours"
-                )
-
-                long_stay_alerted.add(track_id)
-
-                beep(2000, 1000)
-
-            # =====================================
-            # BOUNDING BOX
-            # =====================================
-
-            x1, y1, x2, y2 = map(
-                int,
-                box.xyxy[0]
-            )
-
-            # =====================================
-            # CENTER POINT
-            # =====================================
-
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-
-           
-
-            # =====================================
-            # CHECK RESTRICTED ZONE
-            # =====================================
-
-            inside_zone = (
-                ZONE_X1 <= center_x <= ZONE_X2
-                and
-                ZONE_Y1 <= center_y <= ZONE_Y2
-            )
-
-            if inside_zone:
-
-                cv2.putText(
-                    frame,
-                    "INTRUSION ALERT",
-                    (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    3
-                )
-
-                # =====================================
-                # INTRUSION ALERT
-                # =====================================
-
-                if track_id not in intrusion_alerted:
-
-                    print(
-                        f"🚨 INTRUSION ALERT! "
-                        f"Person {track_id} entered zone"
-                    )
-
-                    intrusion_alerted.add(track_id)
-
-                    beep(1500, 500)
-
-                # =====================================
-                # ZONE TIMER
-                # =====================================
+            if inside:
 
                 if track_id not in zone_entry_time:
                     zone_entry_time[track_id] = time.time()
 
-                time_in_zone = (
-                    time.time()
-                    - zone_entry_time[track_id]
-                )
+                zone_time = time.time() - zone_entry_time[track_id]
 
-                # =====================================
+                # INTRUSION ALERT (instant)
+                if track_id not in intrusion_alerted:
+                    msg = f"🚨 INTRUSION ALERT | ID: {track_id}"
+                    st.session_state.alerts.append(msg)
+                    send_telegram(msg)
+                    send_photo(frame, msg)
+                    intrusion_alerted.add(track_id)
+
                 # LOITERING ALERT
-                # =====================================
-
-                if (
-                    time_in_zone >= LOITER_TIME
-                    and track_id not in loiter_alerted
-                ):
-
-                    print(
-                        f"🚨 LOITERING ALERT! "
-                        f"Person {track_id} stayed "
-                        f"{int(time_in_zone)} sec in zone"
-                    )
-
+                if zone_time > LOITER_TIME and track_id not in loiter_alerted:
+                    msg = f"⚠️ LOITERING ALERT | ID: {track_id}"
+                    st.session_state.alerts.append(msg)
+                    send_telegram(msg)
+                    send_photo(frame, msg)
                     loiter_alerted.add(track_id)
 
-                    beep(1000, 800)
-
             else:
+                zone_entry_time.pop(track_id, None)
 
-                # Reset zone timer when leaving zone
-                if track_id in zone_entry_time:
-                    del zone_entry_time[track_id]
+            # DRAW BOX
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"ID:{track_id}", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # =====================================
-            # LABELS
-            # =====================================
-
-            hours = int(total_time_seen // 3600)
-            minutes = int((total_time_seen % 3600) // 60)
-
-            if track_id in zone_entry_time:
-
-                zone_seconds = int(
-                    time.time()
-                    - zone_entry_time[track_id]
-                )
-
-                label = (
-                    f"ID:{track_id} "
-                    f"Zone:{zone_seconds}s "
-                    f"{hours}h {minutes}m"
-                )
-
-            else:
-
-                label = (
-                    f"ID:{track_id} "
-                    f"{hours}h {minutes}m"
-                )
-
-            # =====================================
-            # DRAW PERSON
-            # =====================================
-
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
-            )
-
-            cv2.putText(
-                frame,
-                label,
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-
-    # =====================================
     # DISPLAY
-    # =====================================
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    video_box.image(frame_rgb, use_container_width=True)
 
-    cv2.imshow(
-        "YOLO Security System",
-        frame
-    )
+    log_box.write("### Alerts")
+    log_box.write(st.session_state.alerts[-10:])
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-# =====================================
-# CLEANUP
-# =====================================
+    time.sleep(0.03)
 
 cap.release()
-cv2.destroyAllWindows()
